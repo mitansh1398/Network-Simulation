@@ -17,27 +17,28 @@
 //
 //           100Mb/s, 20ms      10Mb/s, 50ms     100Mb/s, 20ms
 //       n2-----------------r1-----------------r2-----------------n3
-NS_LOG_COMPONENT_DEFINE ("dumbell-wired");
+NS_LOG_COMPONENT_DEFINE ("wired-topology");
 
 using namespace ns3;
 
 int main(int argc, char *argv[]){
-    uint32_t packetSize = 44;
-    std::string dataRate = "100Mbps";
-    std::string tcpProtocol = "Vegas";
-    bool pcapTracing = false;
-    double simulationTime = 5;
-    std::string flowMonitorFile = "wired-fm";
-    std::string pcapFile = "wired-pcap";
+
+    std::string dataRate = "100Mbps"; //DataRate for application
+    std::string tcpProtocol = "Vegas"; // TCP Protocol used as argument
+    double simulationTime = 5;  // Simulation Time
+
     uint32_t packetSizeArray[10] = {40, 44, 48, 52, 60, 552, 576, 628, 1420, 1500};
-    //taken arguments from cmd
+    
+    /* taken arguments from cmd */
     CommandLine cmd;
     cmd.AddValue ("tcpProtocol", "Transport protocol to use:" "TcpVegas, TcpVeno, TcpWestwood", tcpProtocol);
     cmd.AddValue ("simulationTime", "Simulation time in seconds", simulationTime);
-    cmd.AddValue ("pcap", "Enable/disable PCAP Tracing", pcapTracing);
     cmd.Parse (argc,argv);
+    
     std::cout<<"Simulation time "<<simulationTime<<std::endl;
     std::cout<<"tcpProtocol"<<tcpProtocol<<std::endl;
+    
+    // Setting TCP Protocol according to given argument
     if (tcpProtocol.compare("Westwood")==0){ 
         std::cout<<"Westwood running"<<std::endl;
         Config::SetDefault ("ns3::TcpL4Protocol::SocketType", TypeIdValue (TcpWestwood::GetTypeId ()));
@@ -48,25 +49,25 @@ int main(int argc, char *argv[]){
     } else if(tcpProtocol.compare("Veno")==0){
         std::cout<<"Veno running"<<std::endl;
         Config::SetDefault ("ns3::TcpL4Protocol::SocketType", TypeIdValue (TcpVeno::GetTypeId ()));
-    } else {
+    } else { //if tcp protocol argument doesn't match then return error and abort simulation
         TypeId tcpTid;
         NS_ABORT_MSG_UNLESS (TypeId::LookupByNameFailSafe (tcpProtocol, &tcpTid), "TypeId " << tcpProtocol << " not found");
         Config::SetDefault ("ns3::TcpL4Protocol::SocketType", TypeIdValue (TypeId::LookupByName (tcpProtocol)));
     }
 
+    // GNU Plot data set declaration
     Gnuplot2dDataset dataset_src_dst;
-    Gnuplot2dDataset dataset_dst_src;
+    Gnuplot2dDataset dataset_jain_fairness;
 
+    //creating topology for different packet size and running simulation on them
     for(int i=0; i<10; i++){
-        packetSize = packetSizeArray[i];
-        Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue (packetSize));
-        //xml output file name and pcap file output for traces
-        flowMonitorFile = "wired-fm_" + std::to_string(packetSize) + "_" + tcpProtocol;
-        pcapFile = "wired-pcap_" + std::to_string(packetSize) + "_" + tcpProtocol;
+        uint32_t packetSize = packetSizeArray[i];
 
-        //which tcp congestion algorithm to use.
+        // Setting MSS for TCP layer, Size heere is set without header  
+        Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue (packetSize));
 
         //created topology
+        // Used dumbbell P2P topoloy with both leafs having 1 size
         PointToPointHelper routerToRouter;
         routerToRouter.SetDeviceAttribute ("DataRate", StringValue ("10Mbps"));
         routerToRouter.SetChannelAttribute ("Delay", StringValue ("50ms"));
@@ -77,16 +78,17 @@ int main(int argc, char *argv[]){
         nodeToRouter.SetQueue("ns3::DropTailQueue<Packet>", "MaxSize", QueueSizeValue (QueueSize("250000B")));  
         PointToPointDumbbellHelper topology (1, nodeToRouter, 1, nodeToRouter, routerToRouter);
 
-        //stack installation
+        //stack installation in entire topology
         InternetStackHelper stack;
         topology.InstallStack (stack);
 
-        //subnet allocation
+        //subnet allocation to topology, left and right leaf seperately and bottleneck seperately
         topology.AssignIpv4Addresses (Ipv4AddressHelper ("10.1.1.0", "255.255.255.0"),
                             Ipv4AddressHelper ("10.3.1.0", "255.255.255.0"),
                             Ipv4AddressHelper ("10.2.1.0", "255.255.255.0"));
 
-        //adding application on server side
+        /*Installing application on server side i.e. Node2.
+         Off time set to 0*/
         OnOffHelper serverApp ("ns3::TcpSocketFactory", 
                                 (InetSocketAddress (topology.GetRightIpv4Address (0), 1000)));
         serverApp.SetAttribute ("PacketSize", UintegerValue (packetSize));
@@ -95,60 +97,48 @@ int main(int argc, char *argv[]){
         serverApp.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
         ApplicationContainer onOffApp = serverApp.Install(topology.GetLeft(0));
 
-        //adding sink on destination node
-        // GetAny() returns 0.0.0.0 i.e. the listen address for the sink application.
+        //Installing data sink on destination Node 3
         PacketSinkHelper clientSink ("ns3::TcpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), 1000));
         ApplicationContainer sinkApp = clientSink.Install (topology.GetRight(0));
 
         //started application on both sides
         onOffApp.Start(Seconds(1.0));
         sinkApp.Start(Seconds (0.0));
-        // onOffApp.Stop(Seconds(simulationTime+1));
-        // sinkApp.Stop(Seconds (simulationTime+1));
 
-        //routuing tables 
-        Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
-
-        //added flow monitor to get stats
         Ptr<FlowMonitor> flowMonitor;
         FlowMonitorHelper flowHelper;
         flowMonitor = flowHelper.InstallAll();
-        flowMonitor->CheckForLostPackets();
-            
-        //to get pacap output
-        if (pcapTracing){
-            nodeToRouter.EnablePcapAll(pcapFile);
-        }
+        // Populating routuing tables 
+        Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
-        Simulator::Stop (Seconds (simulationTime + 1));
+        // Stop time of simulator~
+        Simulator::Stop (Seconds (simulationTime+1));
         Simulator::Run ();
-        flowMonitor->SerializeToXmlFile(flowMonitorFile, true, true);
-
         Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
         std::map<FlowId, FlowMonitor::FlowStats> stats = flowMonitor->GetFlowStats();
-
-        std::cout<<"Packet Size "<<packetSize<<std::endl;
-        //display stats
         for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator j = stats.begin(); j != stats.end(); ++j){
-            double throughput_tcp;
-            throughput_tcp = j->second.rxBytes * 8.0 / (j->second.timeLastRxPacket.GetSeconds () - j->second.timeFirstRxPacket.GetSeconds ()) / 1000;
             if(j->first==1){
+                double throughput_tcp = j->second.rxBytes * 8.0 / (j->second.timeLastRxPacket.GetSeconds () - j->second.timeFirstRxPacket.GetSeconds ()) / 1000;
                 dataset_src_dst.Add (packetSize, throughput_tcp);
-            } else {
-                dataset_dst_src.Add (packetSize, throughput_tcp);
+                std::cout<<"Packet Size: "<<packetSize<<"; ";
+                std::cout << "Throughput: " << throughput_tcp << " Kbps; ";
+                dataset_src_dst.Add (packetSize, throughput_tcp);
+                double fairness_index = (throughput_tcp)*(throughput_tcp)/(1*(throughput_tcp*throughput_tcp));
+                dataset_jain_fairness.Add(packetSize, fairness_index);
+                std::cout << "Fairness Index: " << fairness_index << std::endl;
             }
-            Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(j->first);
-            std::cout << tcpProtocol <<" Flow " << j->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
-            std::cout << "Throughput: " << throughput_tcp << " Kbps" << std::endl;
         }
+        
         Simulator::Destroy ();
     }
-	std::string graphicsFileNameSD = tcpProtocol+"throughput_vs_packetSizeSD.png";
+
+    // Plt file and Graph file for throughput vs packetsize
+	std::string graphFileNameSD = tcpProtocol+"throughput_vs_packetSizeSD.png";
 	std::string plotFileNameSD = tcpProtocol+"throughput_vs_packetSizeSD.plt";
-    std::string plotTitleSD = "Throughput vs PacketSize in " + tcpProtocol;
+    std::string plotTitleSD = "wired Throughput vs PacketSize in " + tcpProtocol;
     dataset_src_dst.SetTitle ("Source to Destination");
 	dataset_src_dst.SetStyle (Gnuplot2dDataset::LINES_POINTS);
-    Gnuplot plot(graphicsFileNameSD);
+    Gnuplot plot(graphFileNameSD);
 
     plot.SetTitle (plotTitleSD);
     plot.SetTerminal ("png");
@@ -158,21 +148,20 @@ int main(int argc, char *argv[]){
     plot.GenerateOutput (plotFileSD);
     plotFileSD.close ();
 
-    std::string graphicsFileNameDS = tcpProtocol+"throughput_vs_packetSizeDS.png";
-	std::string plotFileNameDS = tcpProtocol+"throughput_vs_packetSizeDS.plt";
-    std::string plotTitleDS = "Throughput vs PacketSize in " + tcpProtocol;
+    // Plt file and Graph file for Jain Fairness Index vs packetsize
+    std::string graphFileNameJFind = tcpProtocol+"JFind_vs_packetSizeSD.png";
+	std::string plotFileNameJFind = tcpProtocol+"JFind_vs_packetSizeSD.plt";
+    std::string plotTitleJFind = "wired JFind vs PacketSize in " + tcpProtocol;
+    dataset_jain_fairness.SetTitle ("Source to Destination");
+	dataset_jain_fairness.SetStyle (Gnuplot2dDataset::LINES_POINTS);
+    Gnuplot plot3(graphFileNameJFind);
 
-    dataset_dst_src.SetTitle ("Destination to Source");
-	dataset_dst_src.SetStyle (Gnuplot2dDataset::LINES_POINTS);
-
-    Gnuplot plot2(graphicsFileNameDS);
-
-    plot2.SetTitle (plotTitleDS);
-    plot2.SetTerminal ("png");
-    plot2.SetLegend ("Packet Size(in Bytes)", "Throughput Values(in Kbps)");
-    plot2.AddDataset (dataset_dst_src);
-    std::ofstream plotFileDS (plotFileNameDS.c_str());
-    plot2.GenerateOutput (plotFileDS);
-    plotFileDS.close ();
+    plot3.SetTitle (plotTitleJFind);
+    plot3.SetTerminal ("png");
+    plot3.SetLegend ("Packet Size(in Bytes)", "JFind Values");
+    plot3.AddDataset (dataset_jain_fairness);
+    std::ofstream plotFileJFind (plotFileNameJFind.c_str());
+    plot3.GenerateOutput (plotFileJFind);
+    plotFileJFind.close ();
     return 0;
 }       
